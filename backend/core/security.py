@@ -1,45 +1,91 @@
+# ============================================================
+# core/security.py
+# Tier 2 — Security Modules: Hash Algorithm (bcrypt) + JWT
+# ============================================================
+
 from datetime import datetime, timedelta
-from typing import Any, Union
-from jose import jwt
-from passlib.context import CryptContext
-from cryptography.fernet import Fernet
-import base64
-from backend.core.config import settings
-
-# Password Hashing Setup
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# JWT Setup
-ALGORITHM = settings.ALGORITHM
-
-# AES Encryption Setup
-# The key must be a valid Fernet key (url-safe base64-encoded 32-byte key)
-fernet = Fernet(settings.ENCRYPTION_KEY.encode('utf-8'))
+from typing import Optional
+import jwt
+import bcrypt
+from fastapi import HTTPException, status
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+# ── Ayarlar ─────────────────────────────────────────────────
+SECRET_KEY      = "your_very_strong_secret_key_here"  # .env'den okunmalı
+ALGORITHM       = "HS256"
+TOKEN_EXPIRE_H  = 8     # Oturum süresi: 8 saat
+BCRYPT_ROUNDS   = 12    # iş faktörü: yükseldikçe brute-force güçleşir
 
 
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+# ════════════════════════════════════════════════════════════
+# bcrypt — Şifre Hashing
+# ════════════════════════════════════════════════════════════
+
+def hash_password(plaintext: str) -> str:
+    """
+    Şifreyi bcrypt ile hash'ler.
+
+    Akış:
+      1. bcrypt.gensalt(12) → rastgele 22 karakterlik salt üretir
+      2. bcrypt.hashpw(şifre + salt) → 60 karakterlik hash döner
+      3. Sonuç: $2b$12$<salt><hash>
+
+    Neden plaintext saklamıyoruz?
+      - Veritabanı sızıntısında şifreler ele geçirilemez
+      - Her kullanıcı farklı salt → aynı şifreler farklı hash üretir
+      - Rainbow table saldırıları işe yaramaz
+    """
+    salt   = bcrypt.gensalt(rounds=BCRYPT_ROUNDS)
+    hashed = bcrypt.hashpw(plaintext.encode("utf-8"), salt)
+    return hashed.decode("utf-8")
 
 
-def create_access_token(subject: Union[str, Any], expires_delta: timedelta = None) -> str:
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode = {"exp": expire, "sub": str(subject)}
-    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+def verify_password(plaintext: str, hashed: str) -> bool:
+    """
+    Girilen şifreyi hash ile karşılaştırır.
+
+    bcrypt.checkpw() — sabit-zamanlı karşılaştırma:
+      - Her zaman aynı sürede çalışır
+      - Timing saldırılarını engeller
+      - True döndürürse şifre doğrudur
+    """
+    return bcrypt.checkpw(
+        plaintext.encode("utf-8"),
+        hashed.encode("utf-8")
+    )
 
 
-def encrypt_data(data: str) -> str:
-    """Encrypt sensitive data like TCKN using AES-256 (Fernet)"""
-    return fernet.encrypt(data.encode('utf-8')).decode('utf-8')
+# ════════════════════════════════════════════════════════════
+# JWT — Token Üretimi ve Doğrulama
+# ════════════════════════════════════════════════════════════
+
+def create_access_token(data: dict) -> str:
+    """
+    JWT token üretir.
+    Payload: user_id, username, role + exp (son kullanma)
+    """
+    payload = data.copy()
+    expire  = datetime.utcnow() + timedelta(hours=TOKEN_EXPIRE_H)
+    payload.update({"exp": expire, "iss": "ticket-system"})
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def decrypt_data(encrypted_data: str) -> str:
-    """Decrypt AES-256 encrypted data"""
-    return fernet.decrypt(encrypted_data.encode('utf-8')).decode('utf-8')
+def decode_token(token: str) -> dict:
+    """Token'ı doğrular ve payload'ı döner."""
+    try:
+        return jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            issuer="ticket-system"
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Oturum süresi doldu. Tekrar giriş yapın."
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Geçersiz token."
+        )
