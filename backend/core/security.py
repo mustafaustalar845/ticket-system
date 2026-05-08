@@ -1,7 +1,7 @@
-# ============================================================
+
 # core/security.py
 # Tier 2 — Security Modules: Hash Algorithm (bcrypt) + JWT
-# ============================================================
+
 
 from datetime import datetime, timedelta
 from typing import Optional
@@ -10,17 +10,14 @@ import bcrypt
 from fastapi import HTTPException, status
 
 
-# ── Ayarlar ─────────────────────────────────────────────────
-SECRET_KEY      = "your_very_strong_secret_key_here"  # .env'den okunmalı
+
+SECRET_KEY      = "your_very_strong_secret_key_here"  
 ALGORITHM       = "HS256"
-TOKEN_EXPIRE_H  = 8     # Oturum süresi: 8 saat
-BCRYPT_ROUNDS   = 12    # iş faktörü: yükseldikçe brute-force güçleşir
+TOKEN_EXPIRE_H  = 8     
+BCRYPT_ROUNDS   = 12    
 
 
-# ════════════════════════════════════════════════════════════
-# bcrypt — Şifre Hashing
-# ════════════════════════════════════════════════════════════
-
+# bcrypt — Password Hashing
 def hash_password(plaintext: str) -> str:
     """
     Şifreyi bcrypt ile hash'ler.
@@ -55,9 +52,6 @@ def verify_password(plaintext: str, hashed: str) -> bool:
     )
 
 
-# ════════════════════════════════════════════════════════════
-# JWT — Token Üretimi ve Doğrulama
-# ════════════════════════════════════════════════════════════
 
 def create_access_token(data: dict) -> str:
     """

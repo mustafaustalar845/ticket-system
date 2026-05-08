@@ -1,7 +1,6 @@
-# ============================================================
+
 # schemas/user_schema.py
-# API istek/yanıt şemaları — şifre alanları dikkatli yönetilir
-# ============================================================
+
 
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
@@ -18,7 +17,7 @@ class RegisterRequest(BaseModel):
     @classmethod
     def password_strength(cls, v):
         if len(v) < 8:
-            raise ValueError("Şifre en az 8 karakter olmalıdır.")
+            raise ValueError("Password have least include 8 charecter.")
         return v
 
 

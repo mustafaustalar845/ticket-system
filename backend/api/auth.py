@@ -1,7 +1,6 @@
-# ============================================================
+
 # api/auth.py
-# Authentication endpoint'leri — login ve register
-# ============================================================
+
 
 from fastapi import APIRouter, HTTPException, status, Request
 from slowapi import Limiter
@@ -16,7 +15,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 # ── POST /api/auth/login ───────────────────────────────────
 @router.post("/login", response_model=TokenResponse)
-@limiter.limit("10/15minutes")   # Brute-force koruması
+@limiter.limit("10/15minutes")   
 async def login(request: Request, body: LoginRequest):
     """
     Güvenli login akışı:
@@ -36,7 +35,7 @@ async def login(request: Request, body: LoginRequest):
             detail="Geçersiz kullanıcı adı veya şifre."
         )
 
-    # bcrypt doğrulama — timing-safe karşılaştırma
+    
     if not verify_password(body.password, user.password_hash):
         print(f"[AUTH] Başarısız giriş: {body.username}")
         raise HTTPException(
@@ -44,7 +43,7 @@ async def login(request: Request, body: LoginRequest):
             detail="Geçersiz kullanıcı adı veya şifre."
         )
 
-    # JWT token oluştur — payload'a hassas bilgi koyma
+    
     token = create_access_token({
         "user_id":  str(user.id),
         "username": user.username,
@@ -72,7 +71,7 @@ async def register(body: RegisterRequest):
             detail="Bu kullanıcı adı zaten kullanılıyor."
         )
 
-    # Şifreyi hash'le — plaintext veritabanına ASLA yazılmaz
+    
     new_user = User(
         username=body.username.lower().strip(),
         password_hash=hash_password(body.password),

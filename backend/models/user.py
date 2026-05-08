@@ -1,8 +1,7 @@
-# ============================================================
+
 # models/user.py
 # Tier 3 — Secure Database: Hashed Passwords
-# MongoDB için Beanie ODM (Motor async driver üzerinde çalışır)
-# ============================================================
+
 
 from beanie import Document
 from pydantic import Field
@@ -19,33 +18,25 @@ class Role(str, Enum):
 
 class User(Document):
     username:      str
-    password_hash: str            # Veritabanında SADECE hash saklanır, asla plaintext
+    password_hash: str           
     role:          Role = Role.employee
     full_name:     str
     is_active:     bool = True
     created_at:    datetime = Field(default_factory=datetime.utcnow)
 
     class Settings:
-        name = "users"            # MongoDB koleksiyon adı
-
-    # ── Şifre Hash'leme ─────────────────────────────────────
-    # Kullanıcı oluşturulurken çağrılır.
-    # bcrypt: önce rastgele salt üretir, sonra hash hesaplar.
-    # Sonuç formatı: $2b$12$<22 char salt><31 char hash>
+        name = "users"            
     @staticmethod
     def hash_password(plaintext: str) -> str:
         """
-        Plaintext şifreyi bcrypt ile hash'ler.
-        SALT_ROUNDS=12 → brute-force saldırılarını yavaşlatır.
+        Plaintext hashes the password using bcrypt.
+        SALT_ROUNDS=12 → brute-force decrease thes attack.
         """
         salt = bcrypt.gensalt(rounds=12)
         hashed = bcrypt.hashpw(plaintext.encode("utf-8"), salt)
         return hashed.decode("utf-8")
 
-    # ── Şifre Doğrulama ─────────────────────────────────────
-    # Login sırasında kullanılır.
-    # bcrypt.checkpw() → sabit-zamanlı karşılaştırma yapar
-    # (timing saldırılarına karşı güvenli)
+   
     def verify_password(self, plaintext: str) -> bool:
         """
         Girilen şifreyi veritabanındaki hash ile karşılaştırır.
@@ -56,9 +47,9 @@ class User(Document):
             self.password_hash.encode("utf-8")
         )
 
-    # ── JSON'a dönüştürürken password_hash'i gizle ──────────
+    
     def to_safe_dict(self) -> dict:
-        """API response'larında şifre hash'ini asla döndürme."""
+        """Never return the password hash in API responses.."""
         return {
             "id":        str(self.id),
             "username":  self.username,

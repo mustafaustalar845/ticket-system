@@ -1,7 +1,5 @@
-# ============================================================
+
 # api/tickets.py
-# Employee Dashboard endpoint'leri — sıra yönetimi
-# ============================================================
 
 from fastapi import APIRouter, HTTPException, status, Depends
 from beanie import Document
@@ -15,7 +13,7 @@ from core.dependencies import get_current_user, require_employee, require_admin
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
 
-# ── Ticket Modeli ──────────────────────────────────────────
+# ── Ticket Model
 class Ticket(Document):
     ticket_number:   str
     prefix:          str
@@ -53,7 +51,6 @@ async def get_queue(current_user: User = Depends(get_current_user)):
     }
 
 
-# ── GET /api/tickets/active ────────────────────────────────
 @router.get("/active")
 async def get_active(current_user: User = Depends(get_current_user)):
     """Çalışanın aktif olarak servis ettiği bilet."""
@@ -64,7 +61,7 @@ async def get_active(current_user: User = Depends(get_current_user)):
     return {"active": active.dict() if active else None}
 
 
-# ── POST /api/tickets/call-next ────────────────────────────
+
 @router.post("/call-next")
 async def call_next(
     counter: int,
@@ -72,7 +69,7 @@ async def call_next(
 ):
     """Sıradaki müşteriyi çağır (FIFO)."""
 
-    # Çalışanın zaten aktif müşterisi var mı?
+    
     already_serving = await Ticket.find_one(
         Ticket.called_by == str(current_user.id),
         Ticket.status    == "serving"
@@ -83,7 +80,7 @@ async def call_next(
             detail=f"Önce mevcut müşteriyi tamamlayın: {already_serving.ticket_number}"
         )
 
-    # En eski bekleyen bileti al (FIFO)
+    
     next_ticket = await Ticket.find(
         Ticket.status == "waiting"
     ).sort("+created_at").first_or_none()
@@ -94,7 +91,7 @@ async def call_next(
             detail="Sırada bekleyen müşteri yok."
         )
 
-    # Bileti güncelle
+    
     next_ticket.status    = "serving"
     next_ticket.counter   = counter
     next_ticket.called_by = str(current_user.id)
@@ -106,7 +103,6 @@ async def call_next(
     return {"message": "Müşteri çağrıldı.", "ticket": next_ticket.dict()}
 
 
-# ── POST /api/tickets/{id}/complete ───────────────────────
 @router.post("/{ticket_id}/complete")
 async def complete_ticket(
     ticket_id: str,
@@ -118,7 +114,7 @@ async def complete_ticket(
     if not ticket:
         raise HTTPException(status_code=404, detail="Bilet bulunamadı.")
 
-    # Sadece kendi aldığı bileti tamamlayabilir
+    
     if ticket.called_by != str(current_user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
