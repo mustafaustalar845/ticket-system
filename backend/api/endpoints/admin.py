@@ -1,7 +1,4 @@
-# api/endpoints/admin.py
-# SWE210 - Software Security Project
-# Sorumlu: [Senin Adın]
-# Görev: Admin Panel API Endpoint'leri + RBAC
+
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -15,11 +12,11 @@ from schemas.user_schema import UserCreate, UserOut, UserRoleUpdate
 router = APIRouter(prefix="/admin", tags=["Admin Panel"])
 
 
-# ── Tüm Kullanıcıları Listele ──────────────────────────────────────────────────
+
 @router.get("/users", response_model=list[UserOut])
 def list_users(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),   # ← RBAC: sadece admin
+    current_user: User = Depends(require_admin),  
 ):
     """
     Tüm kullanıcıları listeler.
@@ -29,7 +26,7 @@ def list_users(
     return db.query(User).all()
 
 
-# ── Yeni Kullanıcı Ekle ────────────────────────────────────────────────────────
+
 @router.post("/users", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 def create_user(
     user_data: UserCreate,
@@ -41,7 +38,7 @@ def create_user(
     - Şifre hash_password() ile hashlenir, düz metin kaydedilmez.
     - Kullanıcı adı tekrarı kontrolü yapılır.
     """
-    # Kullanıcı adı çakışma kontrolü
+    
     existing = db.query(User).filter(User.username == user_data.username).first()
     if existing:
         raise HTTPException(
@@ -49,7 +46,7 @@ def create_user(
             detail="Bu kullanıcı adı zaten alınmış."
         )
 
-    # Şifreyi hashle — ASLA düz metin kaydetme
+   
     hashed_pw = hash_password(user_data.password)
 
     new_user = User(
@@ -63,13 +60,13 @@ def create_user(
     return new_user
 
 
-# ── Kullanıcı Rolünü Güncelle ──────────────────────────────────────────────────
+
 @router.patch("/users/{user_id}/role", response_model=UserOut)
 def update_user_role(
     user_id: int,
     role_data: UserRoleUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),   # ← RBAC: sadece admin
+    current_user: User = Depends(require_admin),   
 ):
     """
     Kullanıcının rolünü günceller (admin / employee).
@@ -91,12 +88,12 @@ def update_user_role(
     return user
 
 
-# ── Kullanıcı Sil ─────────────────────────────────────────────────────────────
+
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),   # ← RBAC: sadece admin
+    current_user: User = Depends(require_admin),   
 ):
     """
     Kullanıcıyı siler.
