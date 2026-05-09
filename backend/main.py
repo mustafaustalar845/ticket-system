@@ -1,7 +1,8 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from backend.core.database import init_db
-from backend.api.endpoints import auth, tickets, monitor
+from backend.api import auth, tickets
+from backend.api.endpoints import admin, logs, monitor
 
 app = FastAPI(title="Ticket System API")
 
@@ -19,8 +20,12 @@ async def startup_event():
     await init_db()
 
 # Include Routers
-app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
-app.include_router(tickets.router, prefix="/api/tickets", tags=["Tickets"])
+app.include_router(auth.router, prefix="/api", tags=["Auth"])
+app.include_router(tickets.router, prefix="/api", tags=["Tickets"])
+app.include_router(admin.router, prefix="/api", tags=["Admin Panel"])
+app.include_router(logs.router, prefix="/api", tags=["Logs & Public View"])
+
+
 
 @app.websocket("/ws/monitor")
 async def websocket_monitor(websocket: WebSocket):

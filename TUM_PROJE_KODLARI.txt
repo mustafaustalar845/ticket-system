@@ -1,0 +1,809 @@
+
+============================================================
+DOSYA YOLU: .\docker-compose.yml
+============================================================
+
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: ticket_mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: secret
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ticket_backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URL=mongodb://admin:secret@mongodb:27017
+    depends_on:
+      - mongodb
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ticket_frontend
+    ports:
+      - "8080:8080"
+    environment:
+      - API_BASE_URL=http://backend:8000/api
+    depends_on:
+      - backend
+
+volumes:
+  mongo_data:
+
+
+============================================================
+DOSYA YOLU: .\rapor_hazirla.py
+============================================================
+
+import os
+
+# İstemediğimiz klasörleri (Sanal ortamlar, Git dosyaları vb.) filtreliyoruz
+IGNORE_DIRS = ['venv', '.venv', '.git', '__pycache__', '.idea', '.vscode', 'node_modules']
+# Sadece raporlamak istediğimiz kod ve ayar dosyalarının uzantıları
+ALLOWED_EXTENSIONS = ('.py', '.html', '.css', '.js', '.yml', 'Dockerfile', '.env.example', '.md')
+
+output_file = "TUM_PROJE_KODLARI.txt"
+
+with open(output_file, "w", encoding="utf-8") as outfile:
+    for root, dirs, files in os.walk("."):
+        # İstemediğimiz klasörleri atla
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+        
+        for file in files:
+            if file.endswith(ALLOWED_EXTENSIONS) or file == "Dockerfile":
+                filepath = os.path.join(root, file)
+                
+                # Dosya yolunu başlık olarak ekle
+                outfile.write(f"\n{'='*60}\n")
+                outfile.write(f"DOSYA YOLU: {filepath}\n")
+                outfile.write(f"{'='*60}\n\n")
+                
+                # Dosyanın içeriğini oku ve yaz
+                try:
+                    with open(filepath, "r", encoding="utf-8") as infile:
+                        outfile.write(infile.read() + "\n")
+                except Exception as e:
+                    outfile.write(f"--- Bu dosya okunamadi: {e} ---\n")
+
+print(f"İşlem tamam! Tüm proje kodları '{output_file}' dosyasına aktarıldı.")
+
+============================================================
+DOSYA YOLU: .\backend\Dockerfile
+============================================================
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application
+# We will copy the app package
+COPY . /app/backend
+
+# Change working directory so we can run it as a module
+WORKDIR /app
+
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+============================================================
+DOSYA YOLU: .\backend\main.py
+============================================================
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from backend.core.database import init_db
+from backend.api.endpoints import auth, tickets, monitor
+
+app = FastAPI(title="Ticket System API")
+
+# Setup CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Allow all for development, restrict in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+async def startup_event():
+    await init_db()
+
+# Include Routers
+app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(tickets.router, prefix="/api/tickets", tags=["Tickets"])
+
+@app.websocket("/ws/monitor")
+async def websocket_monitor(websocket: WebSocket):
+    await monitor.manager.connect(websocket)
+    try:
+        while True:
+            # We don't expect the client to send messages, just keep it alive
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        monitor.manager.disconnect(websocket)
+
+
+============================================================
+DOSYA YOLU: .\backend\api\dependencies.py
+============================================================
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from backend.core.config import settings
+from backend.models.user import User
+from backend.schemas.user_schema import TokenData
+from beanie import PydanticObjectId
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except JWTError:
+        raise credentials_exception
+        
+    user = await User.find_one(User.username == token_data.username)
+    if user is None:
+        raise credentials_exception
+    return user
+
+async def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
+    return current_user
+
+async def get_current_admin_user(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    return current_user
+
+
+============================================================
+DOSYA YOLU: .\backend\api\endpoints\auth.py
+============================================================
+
+from datetime import timedelta
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from backend.core.security import verify_password, get_password_hash, create_access_token
+from backend.core.config import settings
+from backend.models.user import User
+from backend.schemas.user_schema import UserCreate, UserResponse, Token
+
+router = APIRouter()
+
+@router.post("/register", response_model=UserResponse)
+async def register(user_in: UserCreate):
+    user = await User.find_one(User.username == user_in.username)
+    if user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already registered"
+        )
+    
+    hashed_password = get_password_hash(user_in.password)
+    user = User(
+        username=user_in.username,
+        hashed_password=hashed_password,
+        role=user_in.role
+    )
+    await user.insert()
+    return user
+
+@router.post("/login", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = await User.find_one(User.username == form_data.username)
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        subject=user.username, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+============================================================
+DOSYA YOLU: .\backend\api\endpoints\monitor.py
+============================================================
+
+import asyncio
+from typing import Set
+from fastapi import WebSocket
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Set[WebSocket] = set()
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.add(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_text(message)
+            except Exception:
+                self.active_connections.remove(connection)
+
+manager = ConnectionManager()
+
+
+============================================================
+DOSYA YOLU: .\backend\api\endpoints\tickets.py
+============================================================
+
+from fastapi import APIRouter, Depends, HTTPException
+from backend.schemas.ticket_schema import TicketCreate, TicketResponse
+from backend.services.queue_manager import QueueManager
+from backend.models.user import User
+from backend.api.dependencies import get_current_active_user
+from backend.api.endpoints.monitor import manager
+
+router = APIRouter()
+
+@router.post("/take", response_model=TicketResponse)
+async def take_ticket(ticket_in: TicketCreate):
+    """Endpoint for normal users/kiosk to take a new ticket."""
+    ticket = await QueueManager.create_ticket(ticket_in.tckn)
+    
+    # Broadcast to websocket that a new ticket was added
+    await manager.broadcast(f"New ticket added: {ticket.ticket_number}")
+    
+    return ticket
+
+@router.post("/call_next", response_model=TicketResponse)
+async def call_next_ticket(current_user: User = Depends(get_current_active_user)):
+    """Endpoint for employees/admins to call the next ticket in queue."""
+    ticket = await QueueManager.call_next_ticket(str(current_user.id))
+    if not ticket:
+        raise HTTPException(status_code=404, detail="No waiting tickets in the queue")
+    
+    # Broadcast to websocket that a ticket was called
+    await manager.broadcast(f"Ticket called: {ticket.ticket_number} to Desk")
+    
+    return ticket
+
+
+============================================================
+DOSYA YOLU: .\backend\app\__init__.py
+============================================================
+
+# App package
+
+
+============================================================
+DOSYA YOLU: .\backend\app\core\security.py
+============================================================
+
+import os
+from cryptography.fernet import Fernet
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# AES_SECRET_KEY must be a valid Fernet key (32-byte URL-safe base64-encoded string)
+# You can generate one using Fernet.generate_key()
+SECRET_KEY = os.getenv("AES_SECRET_KEY")
+
+if not SECRET_KEY:
+    raise ValueError("AES_SECRET_KEY not found in environment variables or .env file")
+
+# Initialize Fernet cipher
+cipher_suite = Fernet(SECRET_KEY.encode())
+
+def encrypt_data(plain_text: str) -> str:
+    """
+    Encrypts a string using AES-256 (Fernet) symmetric encryption.
+    
+    Args:
+        plain_text (str): The raw text to be encrypted.
+        
+    Returns:
+        str: The encrypted cipher text as a URL-safe base64 string.
+        
+    Raises:
+        ValueError: If plain_text is not a string.
+    """
+    if not isinstance(plain_text, str):
+        raise ValueError("Data to encrypt must be a string")
+    
+    encoded_text = plain_text.encode('utf-8')
+    encrypted_text = cipher_suite.encrypt(encoded_text)
+    return encrypted_text.decode('utf-8')
+
+def decrypt_data(cipher_text: str) -> str:
+    """
+    Decrypts a Fernet-encrypted cipher text back to its original plain text.
+    
+    Args:
+        cipher_text (str): The encrypted string (base64 encoded).
+        
+    Returns:
+        str: The decrypted original plain text.
+        
+    Raises:
+        ValueError: If decryption fails or input is invalid.
+    """
+    try:
+        if not isinstance(cipher_text, str):
+            raise ValueError("Cipher text must be a string")
+            
+        decoded_cipher = cipher_text.encode('utf-8')
+        decrypted_text = cipher_suite.decrypt(decoded_cipher)
+        return decrypted_text.decode('utf-8')
+    except Exception as e:
+        # Re-raise with a cleaner message for the team
+        raise ValueError(f"Decryption failed. Ensure the key and cipher text are valid. Error: {str(e)}")
+
+# Example usage for testing (uncomment if needed)
+# if __name__ == "__main__":
+#     test_msg = "Sensitive Data 123"
+#     encrypted = encrypt_data(test_msg)
+#     print(f"Encrypted: {encrypted}")
+#     print(f"Decrypted: {decrypt_data(encrypted)}")
+
+
+============================================================
+DOSYA YOLU: .\backend\app\core\__init__.py
+============================================================
+
+# Core security and configuration package
+
+
+============================================================
+DOSYA YOLU: .\backend\core\config.py
+============================================================
+
+import os
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
+
+class Settings(BaseSettings):
+    MONGODB_URL: str
+    MONGODB_DB_NAME: str
+    SECRET_KEY: str
+    ALGORITHM: str
+    ACCESS_TOKEN_EXPIRE_MINUTES: int
+    ENCRYPTION_KEY: str
+
+    model_config = SettingsConfigDict(
+        env_file=str(Path(__file__).resolve().parent.parent.parent / ".env"),
+        env_file_encoding="utf-8"
+    )
+
+settings = Settings()
+
+
+============================================================
+DOSYA YOLU: .\backend\core\database.py
+============================================================
+
+from motor.motor_asyncio import AsyncIOMotorClient
+from beanie import init_beanie
+from backend.core.config import settings
+from backend.models.user import User
+from backend.models.ticket import Ticket
+
+async def init_db():
+    # Initialize MongoDB Client
+    client = AsyncIOMotorClient(settings.MONGODB_URL)
+    
+    # Initialize Beanie with our document models
+    await init_beanie(
+        database=client[settings.MONGODB_DB_NAME],
+        document_models=[
+            User,
+            Ticket
+        ]
+    )
+
+
+============================================================
+DOSYA YOLU: .\backend\core\security.py
+============================================================
+
+from datetime import datetime, timedelta
+from typing import Any, Union
+from jose import jwt
+from passlib.context import CryptContext
+from cryptography.fernet import Fernet
+import base64
+from backend.core.config import settings
+
+# Password Hashing Setup
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# JWT Setup
+ALGORITHM = settings.ALGORITHM
+
+# AES Encryption Setup
+# The key must be a valid Fernet key (url-safe base64-encoded 32-byte key)
+fernet = Fernet(settings.ENCRYPTION_KEY.encode('utf-8'))
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def create_access_token(subject: Union[str, Any], expires_delta: timedelta = None) -> str:
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode = {"exp": expire, "sub": str(subject)}
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def encrypt_data(data: str) -> str:
+    """Encrypt sensitive data like TCKN using AES-256 (Fernet)"""
+    return fernet.encrypt(data.encode('utf-8')).decode('utf-8')
+
+
+def decrypt_data(encrypted_data: str) -> str:
+    """Decrypt AES-256 encrypted data"""
+    return fernet.decrypt(encrypted_data.encode('utf-8')).decode('utf-8')
+
+
+============================================================
+DOSYA YOLU: .\backend\models\ticket.py
+============================================================
+
+from datetime import datetime
+from typing import Optional
+from beanie import Document
+from pydantic import Field
+
+class Ticket(Document):
+    ticket_number: str = Field(index=True) # e.g., A001
+    encrypted_tckn: str # AES-256 encrypted string
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    status: str = Field(default="waiting") # "waiting", "called", "completed"
+    called_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    called_by_user_id: Optional[str] = None # Reference to the user who called it
+
+    class Settings:
+        name = "tickets"
+
+
+============================================================
+DOSYA YOLU: .\backend\models\user.py
+============================================================
+
+from typing import Optional
+from beanie import Document
+from pydantic import Field
+
+class User(Document):
+    username: str = Field(unique=True, index=True)
+    hashed_password: str
+    role: str = Field(default="employee") # "admin" or "employee"
+
+    class Settings:
+        name = "users"
+
+
+============================================================
+DOSYA YOLU: .\backend\schemas\ticket_schema.py
+============================================================
+
+from pydantic import BaseModel, constr
+from typing import Optional
+from datetime import datetime
+
+class TicketCreate(BaseModel):
+    # Expect a valid TCKN pattern (usually 11 digits in Turkey)
+    tckn: constr(min_length=11, max_length=11, pattern=r'^\d+$')
+
+class TicketResponse(BaseModel):
+    ticket_number: str
+    status: str
+    created_at: datetime
+    called_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    
+    model_config = {
+        "from_attributes": True
+    }
+
+
+============================================================
+DOSYA YOLU: .\backend\schemas\user_schema.py
+============================================================
+
+from pydantic import BaseModel, Field
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    role: str = Field(default="employee")
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class UserResponse(BaseModel):
+    username: str
+    role: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    username: str | None = None
+
+
+============================================================
+DOSYA YOLU: .\backend\services\queue_manager.py
+============================================================
+
+from datetime import datetime
+from typing import Optional
+from backend.models.ticket import Ticket
+from backend.core.security import encrypt_data
+
+class QueueManager:
+    @staticmethod
+    async def generate_ticket_number() -> str:
+        """Generate a sequential ticket number like A001, A002..."""
+        # Count today's tickets
+        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        count = await Ticket.find({"created_at": {"$gte": today}}).count()
+        next_number = count + 1
+        return f"A{next_number:03d}"
+
+    @staticmethod
+    async def create_ticket(tckn: str) -> Ticket:
+        """Encrypts TCKN, generates ticket number and saves to DB"""
+        encrypted_tckn = encrypt_data(tckn)
+        ticket_number = await QueueManager.generate_ticket_number()
+        
+        ticket = Ticket(
+            ticket_number=ticket_number,
+            encrypted_tckn=encrypted_tckn
+        )
+        await ticket.insert()
+        return ticket
+
+    @staticmethod
+    async def get_next_ticket() -> Optional[Ticket]:
+        """Gets the oldest waiting ticket in the queue"""
+        ticket = await Ticket.find(Ticket.status == "waiting").sort("created_at").first_or_none()
+        return ticket
+
+    @staticmethod
+    async def call_next_ticket(user_id: str) -> Optional[Ticket]:
+        """Marks the next ticket as called and returns it"""
+        ticket = await QueueManager.get_next_ticket()
+        if ticket:
+            ticket.status = "called"
+            ticket.called_at = datetime.utcnow()
+            ticket.called_by_user_id = user_id
+            await ticket.save()
+            return ticket
+        return None
+
+
+============================================================
+DOSYA YOLU: .\frontend\Dockerfile
+============================================================
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the frontend application
+COPY . /app/frontend
+
+WORKDIR /app/frontend
+
+# Expose NiceGUI port
+EXPOSE 8080
+
+CMD ["python", "main.py"]
+
+
+============================================================
+DOSYA YOLU: .\frontend\main.py
+============================================================
+
+from nicegui import ui, app
+import httpx
+import asyncio
+import os
+
+API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000/api")
+
+ui.add_head_html("""
+    <style>
+        @media print {
+            body * { visibility: hidden; }
+            .print-area, .print-area * { visibility: visible; }
+            .print-area { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; }
+            .no-print { display: none !important; }
+        }
+        .glow-text {
+            text-shadow: 0 0 20px rgba(255, 255, 255, 0.5);
+            transition: color 0.5s ease, text-shadow 0.5s ease;
+        }
+        .monitor-bg {
+            background: radial-gradient(circle at center, #2d3748 0%, #1a202c 100%);
+        }
+    </style>
+""", shared=True)
+
+
+async def login(username, password):
+    async with httpx.AsyncClient() as client:
+        try:
+            # OAuth2 expects form-encoded data
+            response = await client.post(f"{API_BASE_URL}/auth/login", data={"username": username, "password": password})
+            if response.status_code == 200:
+                data = response.json()
+                app.storage.user['token'] = data.get("access_token")
+                ui.notify("Login successful!", type="positive")
+                ui.open("/admin")
+            else:
+                ui.notify("Login failed!", type="negative")
+        except Exception as e:
+            ui.notify(f"Error connecting to server: {e}", type="negative")
+
+async def take_ticket(tckn):
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(f"{API_BASE_URL}/tickets/take", json={"tckn": tckn})
+            if response.status_code == 200:
+                data = response.json()
+                ui.notify(f"Ticket Taken: {data['ticket_number']}", type="positive")
+                
+                with ui.dialog() as dialog, ui.card().classes('print-area flex flex-col items-center p-8 bg-white text-black'):
+                    ui.label("Q-MAT TICKETING").classes('text-2xl font-bold mb-4')
+                    ui.label("Your Ticket Number").classes('text-lg')
+                    ui.label(data['ticket_number']).classes('text-6xl font-extrabold my-4')
+                    ui.label("Please wait for your number to be called.").classes('text-sm text-gray-500 mb-6')
+                    
+                    with ui.row().classes('no-print'):
+                        ui.button('Print', on_click=lambda: ui.run_javascript('window.print()')).classes('bg-blue-500 text-white mr-2')
+                        ui.button('Close', on_click=dialog.close).classes('bg-gray-500 text-white')
+                dialog.open()
+            else:
+                ui.notify(f"Error: {response.json()}", type="negative")
+        except Exception as e:
+            ui.notify(f"Error connecting to server: {e}", type="negative")
+
+async def call_next_ticket():
+    token = app.storage.user.get('token')
+    if not token:
+        ui.notify("Not logged in!", type="negative")
+        return
+
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(f"{API_BASE_URL}/tickets/call_next", headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                ui.notify(f"Called Ticket: {data['ticket_number']}", type="positive")
+            else:
+                ui.notify(f"Error: {response.json()}", type="warning")
+        except Exception as e:
+            ui.notify(f"Error connecting to server: {e}", type="negative")
+
+
+@ui.page('/')
+def index():
+    with ui.column().classes('w-full items-center mt-10'):
+        ui.label('Ticket Kiosk').classes('text-3xl font-bold mb-5')
+        
+        tckn_input = ui.input('Enter 11-digit TCKN').classes('w-64')
+        ui.button('Take Ticket', on_click=lambda: take_ticket(tckn_input.value)).classes('w-64 mt-2 bg-blue-500 text-white')
+        
+        ui.link('Staff Login', '/login').classes('mt-10')
+
+@ui.page('/login')
+def login_page():
+    with ui.column().classes('w-full items-center mt-10'):
+        ui.label('Staff Login').classes('text-3xl font-bold mb-5')
+        username_input = ui.input('Username').classes('w-64')
+        password_input = ui.input('Password', password=True).classes('w-64')
+        ui.button('Login', on_click=lambda: login(username_input.value, password_input.value)).classes('w-64 mt-2 bg-green-500 text-white')
+
+@ui.page('/admin')
+def admin_page():
+    if not app.storage.user.get('token'):
+        return ui.navigate.to('/login')
+
+    with ui.column().classes('w-full items-center mt-10'):
+        ui.label('Staff Dashboard').classes('text-3xl font-bold mb-5')
+        ui.button('Call Next Ticket', on_click=call_next_ticket).classes('w-64 py-4 text-xl bg-orange-500 text-white')
+        
+        def logout():
+            app.storage.user['token'] = None
+            ui.navigate.to('/')
+        ui.button('Logout', on_click=logout).classes('w-64 mt-5 bg-gray-500 text-white')
+
+@ui.page('/monitor')
+def monitor_page():
+    with ui.column().classes('w-full h-screen items-center justify-center monitor-bg text-white m-0 p-0 overflow-hidden').style('position: absolute; top: 0; left: 0;'):
+        ui.label('NOW SERVING').classes('text-5xl font-bold text-gray-400 tracking-[0.2em] mb-8')
+        
+        current_ticket = ui.label('---').classes('text-[15rem] font-extrabold text-white leading-none mb-12 glow-text')
+        current_ticket.props('id="current-ticket"')
+        
+        ui.html("""
+            <script>
+                const host = window.location.hostname;
+                const ws = new WebSocket("ws://" + host + ":8000/ws/monitor");
+                ws.onmessage = function(event) {
+                    const el = document.getElementById("current-ticket");
+                    if (el) {
+                        let data = event.data;
+                        try {
+                            const parsed = JSON.parse(event.data);
+                            data = parsed.ticket_number || event.data;
+                        } catch (e) {
+                            // If it's not JSON, use raw text
+                        }
+                        el.innerText = data;
+                        el.style.color = '#4ade80';
+                        el.style.textShadow = '0 0 40px rgba(74, 222, 128, 0.8)';
+                        setTimeout(() => {
+                            el.style.color = 'white';
+                            el.style.textShadow = '0 0 20px rgba(255, 255, 255, 0.5)';
+                        }, 2000);
+                    }
+                };
+            </script>
+        """)
+
+# NiceGUI setup requires a secret to use sessions (app.storage.user)
+ui.run(title="Ticket System", host="0.0.0.0", port=8080, storage_secret="my-super-secret-key")
+

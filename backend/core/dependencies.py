@@ -5,8 +5,9 @@
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from models.user import User, Role
-from core.security import decode_token
+from backend.models.user import User, Role
+from backend.core.security import decode_token
+
 
 security = HTTPBearer()
 

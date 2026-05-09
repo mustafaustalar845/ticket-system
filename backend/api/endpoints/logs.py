@@ -1,60 +1,32 @@
-
-
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
-from datetime import datetime
-
-from core.database import get_db
-from api.dependencies import get_current_user, require_admin
-from models.ticket import Ticket, AuditLog
-from models.user import User
-from schemas.log_schema import TicketPublicOut, AuditLogOut
+from backend.core.dependencies import get_current_user, require_admin
+from backend.models.ticket import Ticket, AuditLog
+from backend.models.user import User
+from backend.schemas.log_schema import TicketPublicOut, AuditLogOut
+from beanie.operators import In
 
 router = APIRouter(tags=["Logs & Public View"])
 
-
-
 @router.get("/public/tickets", response_model=list[TicketPublicOut])
-def get_public_tickets(db: Session = Depends(get_db)):
-   
-    tickets = (
-        db.query(Ticket)
-        .filter(Ticket.status.in_(["waiting", "called"]))
-        .order_by(Ticket.created_at.asc())
-        .all()
-    )
+async def get_public_tickets():
+    tickets = await Ticket.find(In(Ticket.status, ["waiting", "called"])).sort("+created_at").to_list()
     return tickets
 
-
-
 @router.get("/public/last-called", response_model=TicketPublicOut | None)
-def get_last_called(db: Session = Depends(get_db)):
-    
-    ticket = (
-        db.query(Ticket)
-        .filter(Ticket.status == "called")
-        .order_by(Ticket.called_at.desc())
-        .first()
-    )
+async def get_last_called():
+    ticket = await Ticket.find(Ticket.status == "called").sort("-called_at").first_or_none()
     return ticket
 
-
-
 @router.get("/admin/logs", response_model=list[AuditLogOut])
-def get_audit_logs(
-    db: Session = Depends(get_db),
+async def get_audit_logs(
     current_user: User = Depends(require_admin),   
 ):
-    
-    logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).all()
+    logs = await AuditLog.find_all().sort("-timestamp").to_list()
     return logs
 
-
-
 @router.get("/admin/logs/{event_type}", response_model=list[AuditLogOut])
-def get_logs_by_type(
+async def get_logs_by_type(
     event_type: str,
-    db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """
@@ -62,10 +34,5 @@ def get_logs_by_type(
     Örnek: GET /admin/logs/login_failed
            GET /admin/logs/ticket_called
     """
-    logs = (
-        db.query(AuditLog)
-        .filter(AuditLog.event_type == event_type)
-        .order_by(AuditLog.timestamp.desc())
-        .all()
-    )
+    logs = await AuditLog.find(AuditLog.event_type == event_type).sort("-timestamp").to_list()
     return logs

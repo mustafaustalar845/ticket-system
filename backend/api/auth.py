@@ -5,9 +5,10 @@
 from fastapi import APIRouter, HTTPException, status, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from models.user import User
-from schemas.user_schema import LoginRequest, RegisterRequest, TokenResponse
-from core.security import hash_password, verify_password, create_access_token
+from backend.models.user import User
+from backend.schemas.user_schema import LoginRequest, RegisterRequest, TokenResponse
+from backend.core.security import hash_password, verify_password, create_access_token
+
 
 router  = APIRouter(prefix="/auth", tags=["Authentication"])
 limiter = Limiter(key_func=get_remote_address)

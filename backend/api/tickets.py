@@ -1,35 +1,18 @@
-
-# api/tickets.py
-
 from fastapi import APIRouter, HTTPException, status, Depends
-from beanie import Document
-from pydantic import Field
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
-from bson import ObjectId
-from models.user import User, Role
-from core.dependencies import get_current_user, require_employee, require_admin
+from backend.models.user import User
+from backend.models.ticket import Ticket
+from backend.core.dependencies import get_current_user, require_employee, require_admin
+from backend.core.security import encrypt_data
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
+class TicketCreate(BaseModel):
+    tckn: str = Field(..., min_length=11, max_length=11, description="11 haneli TCKN")
+    prefix: str = "A"
 
-# ── Ticket Model
-class Ticket(Document):
-    ticket_number:   str
-    prefix:          str
-    sequence_number: int
-    status:          str = "waiting"   # waiting | serving | completed | cancelled
-    counter:         Optional[int] = None
-    called_by:       Optional[str] = None   # User ID
-    called_at:       Optional[datetime] = None
-    completed_at:    Optional[datetime] = None
-    created_at:      datetime = Field(default_factory=datetime.utcnow)
-
-    class Settings:
-        name = "tickets"
-
-
-# ── GET /api/tickets/queue ─────────────────────────────────
 @router.get("/queue")
 async def get_queue(current_user: User = Depends(get_current_user)):
     """Bekleyen biletlerin listesi — Dashboard için."""
@@ -50,7 +33,6 @@ async def get_queue(current_user: User = Depends(get_current_user)):
         "total": len(queue)
     }
 
-
 @router.get("/active")
 async def get_active(current_user: User = Depends(get_current_user)):
     """Çalışanın aktif olarak servis ettiği bilet."""
@@ -60,16 +42,12 @@ async def get_active(current_user: User = Depends(get_current_user)):
     )
     return {"active": active.dict() if active else None}
 
-
-
 @router.post("/call-next")
 async def call_next(
     counter: int,
     current_user: User = Depends(get_current_user)
 ):
     """Sıradaki müşteriyi çağır (FIFO)."""
-
-    
     already_serving = await Ticket.find_one(
         Ticket.called_by == str(current_user.id),
         Ticket.status    == "serving"
@@ -80,7 +58,6 @@ async def call_next(
             detail=f"Önce mevcut müşteriyi tamamlayın: {already_serving.ticket_number}"
         )
 
-    
     next_ticket = await Ticket.find(
         Ticket.status == "waiting"
     ).sort("+created_at").first_or_none()
@@ -91,7 +68,6 @@ async def call_next(
             detail="Sırada bekleyen müşteri yok."
         )
 
-    
     next_ticket.status    = "serving"
     next_ticket.counter   = counter
     next_ticket.called_by = str(current_user.id)
@@ -99,9 +75,7 @@ async def call_next(
     await next_ticket.save()
 
     print(f"[TICKET] {next_ticket.ticket_number} → {current_user.username} (Gişe {counter})")
-
     return {"message": "Müşteri çağrıldı.", "ticket": next_ticket.dict()}
-
 
 @router.post("/{ticket_id}/complete")
 async def complete_ticket(
@@ -109,12 +83,12 @@ async def complete_ticket(
     current_user: User = Depends(get_current_user)
 ):
     """Servisi tamamla."""
-    ticket = await Ticket.get(ticket_id)
+    from beanie import PydanticObjectId
+    ticket = await Ticket.get(PydanticObjectId(ticket_id))
 
     if not ticket:
         raise HTTPException(status_code=404, detail="Bilet bulunamadı.")
 
-    
     if ticket.called_by != str(current_user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -127,23 +101,24 @@ async def complete_ticket(
 
     return {"message": "İşlem tamamlandı.", "ticket": ticket.dict()}
 
-
-# ── POST /api/tickets/new ──────────────────────────────────
 @router.post("/new", status_code=status.HTTP_201_CREATED)
-async def create_ticket(prefix: str = "B"):
-    """QR form'dan yeni bilet oluştur (public endpoint)."""
-
+async def create_ticket(body: TicketCreate):
+    """QR form'dan yeni bilet oluştur (public endpoint). TCKN şifrelenerek kaydedilir."""
     last = await Ticket.find(
-        Ticket.prefix == prefix
+        Ticket.prefix == body.prefix
     ).sort("-sequence_number").first_or_none()
 
     seq           = (last.sequence_number + 1) if last else 1
-    ticket_number = f"{prefix}-{seq}"
+    ticket_number = f"{body.prefix}-{seq}"
+    
+    # TCKN Şifreleme (AES-256 Fernet)
+    encrypted_tckn = encrypt_data(body.tckn)
 
     ticket = Ticket(
         ticket_number=ticket_number,
-        prefix=prefix,
-        sequence_number=seq
+        prefix=body.prefix,
+        sequence_number=seq,
+        encrypted_tckn=encrypted_tckn
     )
     await ticket.insert()
 
@@ -156,8 +131,6 @@ async def create_ticket(prefix: str = "B"):
         "ticket": {"ticket_number": ticket_number, "position": position}
     }
 
-
-# ── GET /api/tickets/stats ─────────────────────────────────
 @router.get("/stats")
 async def get_stats(current_user: User = Depends(require_admin)):
     """Admin istatistikleri."""

@@ -1,21 +1,41 @@
-from pydantic import BaseModel, Field
 
-class UserCreate(BaseModel):
+# schemas/user_schema.py
+
+
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional
+from backend.models.user import Role
+
+
+
+class RegisterRequest(BaseModel):
+    username:  str = Field(..., min_length=3, max_length=50)
+    password:  str = Field(..., min_length=8)
+    full_name: str = Field(..., min_length=2)
+    role:      Role = Role.employee
+
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, v):
+        if len(v) < 8:
+            raise ValueError("Password have least include 8 charecter.")
+        return v
+
+
+class LoginRequest(BaseModel):
     username: str
     password: str
-    role: str = Field(default="employee")
 
-class UserLogin(BaseModel):
-    username: str
-    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type:   str = "bearer"
+    user:         dict
+
 
 class UserResponse(BaseModel):
-    username: str
-    role: str
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
-class TokenData(BaseModel):
-    username: str | None = None
+    id:        str
+    username:  str
+    full_name: str
+    role:      Role
+    is_active: bool
