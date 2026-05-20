@@ -19,6 +19,14 @@ app.add_middleware(
 async def startup_event():
     await init_db()
 
+@app.get("/")
+def read_root():
+    return {
+        "status": "online",
+        "message": "Sıra Sistemi API başarıyla çalışıyor.",
+        "documentation": "Tüm işlemleri ve API detaylarını görmek için http://localhost:8000/docs adresini ziyaret edin."
+    }
+
 # Include Routers
 app.include_router(auth.router, prefix="/api", tags=["Auth"])
 app.include_router(tickets.router, prefix="/api", tags=["Tickets"])

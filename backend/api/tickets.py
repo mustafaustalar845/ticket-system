@@ -40,7 +40,16 @@ async def get_active(current_user: User = Depends(get_current_user)):
         Ticket.called_by == str(current_user.id),
         Ticket.status    == "serving"
     )
-    return {"active": active.dict() if active else None}
+    if not active:
+        return {"active": None}
+    return {
+        "active": {
+            "id": str(active.id),
+            "ticket_number": active.ticket_number,
+            "status": active.status,
+            "counter": active.counter
+        }
+    }
 
 @router.post("/call-next")
 async def call_next(
@@ -75,7 +84,15 @@ async def call_next(
     await next_ticket.save()
 
     print(f"[TICKET] {next_ticket.ticket_number} → {current_user.username} (Gişe {counter})")
-    return {"message": "Müşteri çağrıldı.", "ticket": next_ticket.dict()}
+    return {
+        "message": "Müşteri çağrıldı.",
+        "ticket": {
+            "id": str(next_ticket.id),
+            "ticket_number": next_ticket.ticket_number,
+            "status": next_ticket.status,
+            "counter": next_ticket.counter
+        }
+    }
 
 @router.post("/{ticket_id}/complete")
 async def complete_ticket(
@@ -99,7 +116,15 @@ async def complete_ticket(
     ticket.completed_at = datetime.utcnow()
     await ticket.save()
 
-    return {"message": "İşlem tamamlandı.", "ticket": ticket.dict()}
+    return {
+        "message": "İşlem tamamlandı.",
+        "ticket": {
+            "id": str(ticket.id),
+            "ticket_number": ticket.ticket_number,
+            "status": ticket.status,
+            "counter": ticket.counter
+        }
+    }
 
 @router.post("/new", status_code=status.HTTP_201_CREATED)
 async def create_ticket(body: TicketCreate):
